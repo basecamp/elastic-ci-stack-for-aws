@@ -2,38 +2,6 @@
 
 set -eu -o pipefail
 
-s3_exists() {
-  local bucket="$1"
-  local key="$2"
-  local aws_s3_args=("--region=$AWS_DEFAULT_REGION")
-
-  if [[ -n "${BUILDKITE_SECRETS_KEY:-}" ]] ; then
-    aws_s3_args+=("--sse-customer-algorithm" "AES256" "--sse-customer-key" "${BUILDKITE_SECRETS_KEY}")
-  fi
-
-  if ! env -i aws s3api head-object "${aws_s3_args[@]}" --bucket "$bucket" --key "$key" &>/dev/null ; then
-    return 1
-  fi
-}
-
-s3_download() {
-  local bucket="$1"
-  local key="$2"
-  local aws_s3_args=("--quiet" "--region=$AWS_DEFAULT_REGION")
-
-  if [[ -n "${BUILDKITE_SECRETS_KEY:-}" ]] ; then
-    aws_s3_args+=("--sse-c" "AES256" "--sse-c-key" "${BUILDKITE_SECRETS_KEY}")
-  elif [[ "${BUILDKITE_USE_KMS:-true}" =~ ^(true|1)$ ]] ; then
-    aws_s3_args+=("--sse" "aws:kms")
-  fi
-
-  if ! env -i aws s3 cp "${aws_s3_args[@]}" "s3://$1/$2" /dev/stdout ; then
-    exit 1
-  fi
-}
-
-echo "~~~ Setting up the environment"
-
 echo "Sourcing CloudFormation environment..."
 
 # shellcheck source=/dev/null
@@ -43,93 +11,14 @@ export AWS_REGION
 export AWS_DEFAULT_REGION
 export AWS_ECR_LOGIN
 
-echo "Starting an SSH Agent..."
-eval "$(ssh-agent -s)"
-echo
-
-if [[ -n "${BUILDKITE_SECRETS_BUCKET:-}" ]] ; then
-  if [[ -n "${BUILDKITE_SECRETS_KEY:-}" ]] ; then
-    echo "~~~ :warning: Deprecated BUILDKITE_SECRETS_KEY env variable"
-    echo "AWS KMS is now the supported method for decrypting files from your secrets bucket."
-    echo "See https://github.com/buildkite/elastic-ci-stack-for-aws#secrets-bucket-support"
-  fi
-
-  echo "~~~ Downloading secrets from ${BUILDKITE_SECRETS_BUCKET}"
-
-  # Allow environment vars set in Buildkite to override paths
-  secrets_prefix="${BUILDKITE_SECRETS_PREFIX:-$BUILDKITE_PIPELINE_SLUG}"
-
-  # Locations to check for ssh keys
-  ssh_key_paths=(
-    "$secrets_prefix/${SSH_KEY_NAME:-private_ssh_key}"
-    "$secrets_prefix/id_rsa_github"
-    "${SHARED_SSH_KEY_NAME:-private_ssh_key}"
-    "id_rsa_github"
-  )
-
-  for key in ${ssh_key_paths[*]} ; do
-    if s3_exists "${BUILDKITE_SECRETS_BUCKET}" "$key" ; then
-      echo "Downloading ssh-key $key"
-      if ! ssh_key=$(s3_download "${BUILDKITE_SECRETS_BUCKET}" "$key") ; then
-        echo "~~~ :warning: Failed to download ssh-key $key"
-        exit 1
-      fi
-      SSH_ASKPASS="/bin/false" ssh-add <(echo "$ssh_key")
-      key_found=1
-      break
-    fi
-  done
-
-  if [[ -z "${key_found:-}" ]] && [[ "${BUILDKITE_REPO:-}" =~ ^git ]] ; then
-    echo "~~~ :warning: Failed to find an SSH key in secret bucket"
-    exit 1
-  fi
-
-  env_paths=(
-    "env"
-    "${secrets_prefix}/env"
-  )
-
-  echo "~~~ Downloading env files"
-
-  for key in ${env_paths[*]} ; do
-    if s3_exists "${BUILDKITE_SECRETS_BUCKET}" "$key" ; then
-      if ! envvars=$(s3_download "${BUILDKITE_SECRETS_BUCKET}" "$key") ; then
-        echo "~~~ :warning: Failed to download env from $key"
-        exit 1
-      fi
-      echo "Downloading env $key"
-      eval "$envvars"
-    fi
-  done
-
-  git_credentials_paths=(
-    "git-credentials"
-    "${secrets_prefix}/git-credentials"
-  )
-
-  echo "~~~ Downloading git-credentials files"
-
-  for key in ${git_credentials_paths[*]} ; do
-    if s3_exists "${BUILDKITE_SECRETS_BUCKET}" "$key" ; then
-      if ! envvars=$(s3_download "${BUILDKITE_SECRETS_BUCKET}" "$key") ; then
-        echo "~~~ :warning: Failed to download git-credentials from $key"
-        exit 1
-      fi
-      echo "Downloading git-credentials $key"
-      mv "$key" .git-credentials
-      git config credential.helper "store --file=$PWD/.git-credentials"
-    fi
-  done
-
+if [[ -n "${SECRETS_PLUGIN_ENABLED:-1}" ]] ; then
+  # shellcheck source=/dev/null
+  source /usr/local/buildkite-aws-stack/plugins/secrets/hooks/pre-command.sh
 fi
 
 echo "Waiting for Docker..."
 timeout 30 docker ps
 echo
-
-unset BUILDKITE_SECRETS_BUCKET
-unset BUILDKITE_SECRETS_KEY
 
 # We need to scope the next bit to only the currently running agent's builds,
 # but we also need to control security and make sure arbitrary folders can't be
