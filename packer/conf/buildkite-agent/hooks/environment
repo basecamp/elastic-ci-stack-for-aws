@@ -13,7 +13,7 @@ export AWS_ECR_LOGIN
 
 if [[ -n "${SECRETS_PLUGIN_ENABLED:-1}" ]] ; then
   # shellcheck source=/dev/null
-  source /usr/local/buildkite-aws-stack/plugins/secrets/hooks/pre-command.sh
+  source /usr/local/buildkite-aws-stack/plugins/secrets/hooks/environment
 fi
 
 echo "Waiting for Docker..."
